@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>스마트팜 드론 by JEMUL</title>
+
+<style>
+body { margin:0; overflow:hidden; font-family:sans-serif; }
+
+#ui {
+ position:absolute; top:10px; left:10px;
+ background:white; padding:10px; border-radius:10px;
+}
+
+#timer {
+ position:absolute; top:10px; right:10px;
+ background:black; color:white; padding:10px;
+}
+
+.overlay {
+ position:absolute; inset:0;
+ display:flex; justify-content:center; align-items:center;
+ flex-direction:column;
+ background:rgba(0,0,0,0.7);
+ color:white;
+}
+
+button { padding:10px 20px; margin-top:10px; font-size:16px; }
+</style>
+</head>
+
+<body>
+
+<!-- 인트로 -->
+<div id="intro" class="overlay">
+<svg width="120" height="120" viewBox="0 0 100 100">
+<rect x="40" y="40" width="20" height="20" fill="#00aaff"/>
+<line x1="50" y1="50" x2="20" y2="20" stroke="#333" stroke-width="3"/>
+<line x1="50" y1="50" x2="80" y2="20" stroke="#333" stroke-width="3"/>
+<line x1="50" y1="50" x2="20" y2="80" stroke="#333" stroke-width="3"/>
+<line x1="50" y1="50" x2="80" y2="80" stroke="#333" stroke-width="3"/>
+<circle cx="20" cy="20" r="6" fill="#222"/>
+<circle cx="80" cy="20" r="6" fill="#222"/>
+<circle cx="20" cy="80" r="6" fill="#222"/>
+<circle cx="80" cy="80" r="6" fill="#222"/>
+</svg>
+
+<h1>스마트팜 드론 by JEMUL</h1>
+<button onclick="startGame()">게임 시작</button>
+</div>
+
+<!-- 오버레이 -->
+<div id="overlay" class="overlay" style="display:none;">
+ <div id="msg"></div>
+ <button onclick="nextAction()">확인</button>
+</div>
+
+<div id="ui"><div id="info"></div></div>
+<div id="timer">0.0s</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+
+<script>
+// ===== 사운드 =====
+const startSound = new Audio("https://actions.google.com/sounds/v1/cartoon/clang_and_wobble.ogg");
+const spraySound = new Audio("https://actions.google.com/sounds/v1/water/water_spray.ogg");
+const hitSound = new Audio("https://actions.google.com/sounds/v1/impacts/crash.ogg");
+const clearSound = new Audio("https://actions.google.com/sounds/v1/cartoon/party_horn.ogg");
+const gameOverSound = new Audio("https://actions.google.com/sounds/v1/cartoon/boing.ogg");
+
+const droneSound = new Audio("https://actions.google.com/sounds/v1/ambiences/warehouse_fan.ogg");
+droneSound.loop = true;
+droneSound.volume = 0.3;
+
+// ===== 상태 =====
+let state="INTRO";
+
+// ===== THREE =====
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x87CEEB);
+
+const camera=new THREE.OrthographicCamera(
+ innerWidth/-25,innerWidth/25,
+ innerHeight/25,innerHeight/-25,1,1000
+);
+camera.position.set(40,40,40);
+camera.lookAt(0,0,0);
+
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth,innerHeight);
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xffffff,0.8));
+
+// 바닥
+const ground=new THREE.Mesh(
+ new THREE.PlaneGeometry(80,80),
+ new THREE.MeshLambertMaterial({color:0x7ec850})
+);
+ground.rotation.x=-Math.PI/2;
+scene.add(ground);
+
+// 드론
+const drone=new THREE.Group();
+const body=new THREE.Mesh(
+ new THREE.BoxGeometry(1.5,0.5,1.5),
+ new THREE.MeshLambertMaterial({color:0x00aaff})
+);
+drone.add(body);
+
+let props=[];
+for(let i=0;i<4;i++){
+ let p=new THREE.Mesh(
+  new THREE.BoxGeometry(0.2,0.05,1.2),
+  new THREE.MeshLambertMaterial({color:0x222})
+ );
+ let x=(i<2?1:-1)*1.5;
+ let z=(i%2?1:-1)*1.5;
+ p.position.set(x,0.5,z);
+ drone.add(p);
+ props.push(p);
+}
+drone.position.set(0,3,0);
+scene.add(drone);
+
+// 스테이션
+const batteryStation=new THREE.Mesh(
+ new THREE.CylinderGeometry(2,2,1),
+ new THREE.MeshLambertMaterial({color:0x00ff00})
+);
+batteryStation.position.set(-15,0.5,-15);
+scene.add(batteryStation);
+
+const sprayStation=new THREE.Mesh(
+ new THREE.CylinderGeometry(2,2,1),
+ new THREE.MeshLambertMaterial({color:0x0000ff})
+);
+sprayStation.position.set(15,0.5,-15);
+scene.add(sprayStation);
+
+// 작물
+let crops=[], remainingCrops=0;
+function createCrops(){
+ crops.forEach(c=>scene.remove(c));
+ crops=[]; remainingCrops=0;
+
+ for(let x=-14;x<=14;x+=2){
+  for(let z=-14;z<=14;z+=2){
+   let c=new THREE.Mesh(
+    new THREE.CylinderGeometry(0.2,0.2,1),
+    new THREE.MeshLambertMaterial({color:0x2e8b57})
+   );
+   c.position.set(x,0.5,z);
+   c.userData.sprayed=false;
+   scene.add(c);
+   crops.push(c);
+   remainingCrops++;
+  }
+ }
+}
+
+// 새
+let flocks=[];
+function createFlocks(level){
+ flocks.forEach(f=>scene.remove(f));
+ flocks=[];
+ for(let k=0;k<level;k++){
+  let g=new THREE.Group();
+  for(let i=0;i<5;i++){
+   let b=new THREE.Mesh(
+    new THREE.BoxGeometry(0.5,0.1,0.3),
+    new THREE.MeshLambertMaterial({color:0x111})
+   );
+   b.position.set(i*0.6,0,Math.abs(i-2)*0.3);
+   g.add(b);
+  }
+  g.position.set(Math.random()*20-10,5,Math.random()*20-10);
+  g.userData.dir=Math.random()>0.5?1:-1;
+  scene.add(g);
+  flocks.push(g);
+ }
+}
+
+// 입력
+let keys={}, spraying=false;
+document.addEventListener("keydown",e=>keys[e.key.toLowerCase()]=true);
+document.addEventListener("keyup",e=>keys[e.key.toLowerCase()]=false);
+window.addEventListener("mousedown",()=>spraying=true);
+window.addEventListener("mouseup",()=>spraying=false);
+
+// 자원
+let level=1,battery=100,sprayAmount=100;
+let globalTime=0,hitTimer=0;
+
+// 스프레이
+let particles=[];
+function spray(){
+ for(let i=0;i<15;i++){
+  let p=new THREE.Mesh(
+   new THREE.SphereGeometry(0.15),
+   new THREE.MeshBasicMaterial({color:0x66ccff})
+  );
+  p.position.copy(drone.position);
+  p.userData.vel=new THREE.Vector3(
+   (Math.random()-0.5)*0.6,
+   -0.6,
+   (Math.random()-0.5)*0.6
+  );
+  scene.add(p);
+  particles.push(p);
+ }
+}
+
+// 시작
+function startGame(){
+ startSound.play();
+ droneSound.play();
+
+ document.getElementById("intro").style.display="none";
+ level=1; globalTime=0;
+ startLevel();
+ state="PLAYING";
+}
+
+function startLevel(){
+ battery=100;
+ sprayAmount=100;
+ createCrops();
+ createFlocks(level);
+ drone.position.set(0,3,0);
+}
+
+// 버튼
+function nextAction(){
+ document.getElementById("overlay").style.display="none";
+
+ if(state==="LEVEL_CLEAR"){
+  level++;
+  startLevel();
+  state="PLAYING";
+ }
+ else{
+  droneSound.pause();
+  document.getElementById("intro").style.display="flex";
+  document.getElementById("timer").innerText="0.0s";
+  state="INTRO";
+ }
+}
+
+// 업데이트
+function update(){
+
+ if(state!=="PLAYING") return;
+
+ globalTime+=0.016;
+ document.getElementById("timer").innerText=globalTime.toFixed(1)+"s";
+
+ if(battery<=0){
+  gameOverSound.play();
+  state="GAME_OVER";
+  showOverlay("💀 게임 오버");
+  return;
+ }
+
+ if(hitTimer>0){
+  hitTimer--;
+  drone.position.x+=(Math.random()-0.5)*0.6;
+  drone.position.z+=(Math.random()-0.5)*0.6;
+ }else{
+  if(keys["w"]) drone.position.z-=0.3;
+  if(keys["s"]) drone.position.z+=0.3;
+  if(keys["a"]) drone.position.x-=0.3;
+  if(keys["d"]) drone.position.x+=0.3;
+ }
+
+ battery-=0.05;
+
+ function dist(a,b){ return Math.hypot(a.x-b.x,a.z-b.z); }
+
+ if(dist(drone.position,batteryStation.position)<3) battery+=0.8;
+ if(dist(drone.position,sprayStation.position)<3) sprayAmount+=1.2;
+
+ battery=Math.max(0,Math.min(100,battery));
+ sprayAmount=Math.max(0,Math.min(100,sprayAmount));
+
+ // 🔥 충돌 → 흔들림만 (배터리 감소 없음)
+ flocks.forEach(f=>{
+  f.position.x+=0.1*f.userData.dir;
+  if(f.position.x>15||f.position.x<-15) f.userData.dir*=-1;
+
+  if(f.position.distanceTo(drone.position)<3){
+   hitTimer=120;
+   hitSound.play();
+  }
+ });
+
+ if(spraying && sprayAmount>0){
+  if(spraySound.paused){
+   spraySound.currentTime=0;
+   spraySound.play();
+  }
+
+  spray();
+  sprayAmount-=0.5;
+
+  crops.forEach(c=>{
+   if(!c.userData.sprayed &&
+      Math.abs(c.position.x-drone.position.x)<4 &&
+      Math.abs(c.position.z-drone.position.z)<4){
+    c.material.color.set(0xaaaaaa);
+    c.userData.sprayed=true;
+    remainingCrops--;
+   }
+  });
+ }
+
+ if(remainingCrops===0){
+  if(level>=5){
+   clearSound.play();
+   state="GAME_CLEAR";
+   showOverlay("🏆 전체 완료!<br>시간: "+globalTime.toFixed(1)+"초");
+  }else{
+   clearSound.play();
+   state="LEVEL_CLEAR";
+   showOverlay("🎉 레벨 "+level+" 성공!");
+  }
+ }
+
+ particles.forEach((p,i)=>{
+  p.position.add(p.userData.vel);
+  p.userData.vel.y-=0.03;
+  if(p.position.y<0){
+   scene.remove(p);
+   particles.splice(i,1);
+  }
+ });
+
+ props.forEach(p=>p.rotation.y+=1);
+
+ document.getElementById("info").innerHTML =
+  "레벨:"+level+
+  "<br>배터리:"+battery.toFixed(0)+
+  "<br>농약:"+sprayAmount.toFixed(0)+
+  "<br>남은 작물:"+remainingCrops;
+}
+
+function showOverlay(text){
+ document.getElementById("overlay").style.display="flex";
+ document.getElementById("msg").innerHTML=text;
+}
+
+// 루프
+function animate(){
+ requestAnimationFrame(animate);
+ update();
+ renderer.render(scene,camera);
+}
+animate();
+
+</script>
+</body>
+</html>
